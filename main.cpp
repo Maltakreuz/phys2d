@@ -9,8 +9,9 @@ int SCREEN_HEIGHT = 1340;
 int BALLS_COUNT = 800;
 int MIN_SIZE = 10;
 int MAX_SIZE = 20;
-float GRAVITY = 500;
-int RESOLVE_STEPS = 124;
+float GRAVITY = 600;
+int RESOLVE_STEPS = 32;
+float EXPLOSION_STRENGTH = 2;
 
 struct Vec2 {
     float x, y;
@@ -63,8 +64,9 @@ struct Vec2 {
 };
 
 struct Ball {
-    SDL_FPoint pos;
-    SDL_FPoint vel;
+    Vec2 pos;
+    Vec2 prev_pos;
+    Vec2 vel;
     SDL_Color color;
     float radius;
     bool colliding = false;
@@ -105,6 +107,7 @@ std::vector<BallPair> detect_collisions();
 void resolve_collisions_naive_iterative(const std::vector<BallPair>& pairs, int iterations);
 void resolve_collisions_impulse(const std::vector<BallPair>& pairs, int iterations);
 void resolve_collisions_impulse_baumgarte(const std::vector<BallPair>& pairs, int iterations);
+void resolve_collisions_pbd(const std::vector<BallPair>& pairs, int iterations);
 void explode_nearby_balls(Vec2 center, float radius, float strength, std::vector<Ball>& balls);
 
 std::vector<Ball> balls;
@@ -125,12 +128,12 @@ int main(int argc, char* argv[]) {
                 float fx = event.tfinger.x * SCREEN_WIDTH;
                 float fy = event.tfinger.y * SCREEN_HEIGHT;
                 Vec2 center = {fx, fy};
-                explode_nearby_balls(center, 900.0f, 2000.0f, balls);
+                explode_nearby_balls(center, 900.0f, EXPLOSION_STRENGTH, balls);
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                 int mx = event.button.x;
                 int my = event.button.y;
                 Vec2 center = {(float)mx, (float)my};
-                explode_nearby_balls(center, 900.0f, 2000.0f, balls);
+                explode_nearby_balls(center, 900.0f, EXPLOSION_STRENGTH, balls);
             }
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
@@ -184,7 +187,6 @@ void init() {
 fps_start_time = SDL_GetTicks();
     fps_frames = 0;
     init_balls(BALLS_COUNT);
-
 }
 
 void cleanup() {
@@ -275,7 +277,7 @@ std::sort(collision_pairs.begin(), collision_pairs.end(), [](const BallPair& a, 
 });
 
 resolve_collisions_impulse_baumgarte(collision_pairs, RESOLVE_STEPS);
-
+resolve_collisions_pbd(collision_pairs, RESOLVE_STEPS);
 //resolve_collisions_naive_iterative(collision_pairs, RESOLVE_STEPS);
 }
 
@@ -316,52 +318,102 @@ sprintf(ver_buf, "SDL compiled: %d.%d.%d  linked: %d.%d.%d",
     draw_text(balls_no_buf, 400, 20);
 }
 
+void init_ball(int x, int y) {
+    Ball b;
+    b.pos.x = x;
+    b.pos.y = y;
+    b.prev_pos = b.pos;
+    b.vel.x = ((rand() % 200) - 100) / 50.0f;
+    b.vel.y = ((rand() % 200) - 100) / 50.0f;
+    b.radius = MIN_SIZE + rand() % MAX_SIZE;
+    b.color = {
+        static_cast<Uint8>(rand() % 256),
+        static_cast<Uint8>(rand() % 256),
+        static_cast<Uint8>(rand() % 256),
+        255
+    };
+    balls.push_back(b);
+}
+
 void init_balls(int count) {
     balls.clear();
     balls.reserve(count);
+
+    int step = MIN_SIZE + MAX_SIZE + 20;
+    int max_cols = SCREEN_WIDTH / step;
+
     for (int i = 0; i < count; ++i) {
-        Ball b;
-        b.pos.x = rand() % SCREEN_WIDTH;
-        b.pos.y = rand() % SCREEN_HEIGHT;
-        b.vel.x = ((rand() % 2000) - 100) / 50.0f;
-        b.vel.y = ((rand() % 200) - 100) / 50.0f;
-        b.radius = MIN_SIZE + rand() % MAX_SIZE;
-        b.color = {
-            static_cast<Uint8>(rand() % 256),
-            static_cast<Uint8>(rand() % 256),
-            static_cast<Uint8>(rand() % 256),
-            255
-        };
-        balls.push_back(b);
+        int col = i % max_cols;
+        int row = i / max_cols;
+
+        int x = col * step;
+        int y = SCREEN_HEIGHT - step * (row + 1);  // снизу вверх, начиная от пола
+
+        init_ball(x, y);
     }
 }
 
-void update_ball(Ball& b) {
+void update_ball_by_velocity(Ball& b) {
     b.vel.y += GRAVITY * dt;
     b.pos.x += b.vel.x * dt;
     b.pos.y += b.vel.y * dt;
+}
 
-    // Отскок от пола
+void update_ball_verlet_by_pos(Ball& b) {
+    Vec2 temp = b.pos;
+    Vec2 acceleration = {0.0f, GRAVITY}; // только гравитация
+    // Verlet: pos += (pos - prev_pos) + acceleration * dt^2
+    b.pos += (b.pos - b.prev_pos) + acceleration * (dt * dt);
+    b.prev_pos = temp;
+}
+
+void update_ball_walls_and_floor(Ball& b) {
+
+    float CEILING_OUT_OF_SCREEN = 1080;
+    // Границы
     float floor_y = (float)(SCREEN_HEIGHT - b.radius);
-    if (b.pos.y > floor_y)
-    {
-        b.pos.y = floor_y;
-        b.vel.y = -b.vel.y * 0.7f; // потеря энергии на отскоке
-    }
-
-    // Отскок от стенок
+    float ceiling_y = -CEILING_OUT_OF_SCREEN + b.radius; // потолок выше экрана
     float left_x = (float)b.radius;
     float right_x = (float)(SCREEN_WIDTH - b.radius);
-    if (b.pos.x < left_x)
-    {
+
+    // Отскок от пола
+    if (b.pos.y > floor_y) {
+        b.pos.y = floor_y;
+        b.vel.y = -b.vel.y * 0.7f;
+        //b.prev_pos = b.pos;
+    }
+
+    // Отскок от потолка
+    if (b.pos.y < ceiling_y) {
+        b.pos.y = ceiling_y;
+        b.vel.y = -b.vel.y * 0.7f;
+        //b.prev_pos = b.pos;
+    }
+
+    // Отскок от стен
+    if (b.pos.x < left_x) {
         b.pos.x = left_x;
         b.vel.x = -b.vel.x * 0.7f;
-    }
-    else if (b.pos.x > right_x)
-    {
+        //b.prev_pos = b.pos;
+    } else if (b.pos.x > right_x) {
         b.pos.x = right_x;
         b.vel.x = -b.vel.x * 0.7f;
+        //b.prev_pos = b.pos;
     }
+    
+}
+
+
+void update_ball(Ball& b) {
+    bool use_verlet = true;
+
+    if (!use_verlet) {
+        update_ball_by_velocity(b);
+    } else {
+        update_ball_verlet_by_pos(b);
+    }
+
+    update_ball_walls_and_floor(b);
 }
 
 std::vector<BallPair> broad_phase() {
@@ -469,8 +521,7 @@ void resolve_collisions_naive_iterative(const std::vector<BallPair>& pairs, int 
     }
 }
 
-void resolve_collisions_impulse(const std::vector<BallPair>& pairs, int iterations)
-{
+void resolve_collisions_impulse(const std::vector<BallPair>& pairs, int iterations) {
     for (int iter = 0; iter < iterations; ++iter) {
         for (const BallPair& pair : pairs) {
             Ball& a = balls[pair.a];
@@ -524,8 +575,7 @@ Vec2 pos_a(a.pos.x, a.pos.y);
     }
 }
 
-void resolve_collisions_impulse_baumgarte(const std::vector<BallPair>& pairs, int iterations)
-{
+void resolve_collisions_impulse_baumgarte(const std::vector<BallPair>& pairs, int iterations) {
     constexpr float baumgarte_base = 0.2f;  // базовый коэффициент Baumgarte
     constexpr float penetration_slop = 0.05f; // минимальный порог проникновения, ниже которого не исправляем
 
@@ -574,7 +624,33 @@ void resolve_collisions_impulse_baumgarte(const std::vector<BallPair>& pairs, in
     }
 }
 
-void explode_nearby_balls(Vec2 center, float radius, float strength, std::vector<Ball>& balls) {
+void resolve_collisions_pbd(const std::vector<BallPair>& pairs, int iterations) {
+    for (int step = 0; step < iterations; ++step) {
+        for (const BallPair& pair : pairs) {
+            Ball& a = balls[pair.a];
+            Ball& b = balls[pair.b];
+
+            Vec2 delta = {b.pos.x - a.pos.x, b.pos.y - a.pos.y};
+            float dist2 = delta.length_squared();
+            float r = a.radius + b.radius;
+
+            if (dist2 < r * r && dist2 > 0.0001f) {
+                float dist = sqrt(dist2);
+                float penetration = r - dist;
+                Vec2 correction = delta * (0.5f * penetration / dist); // поровну
+
+                a.pos.x -= correction.x;
+                a.pos.y -= correction.y;
+                b.pos.x += correction.x;
+                b.pos.y += correction.y;
+
+                a.colliding = b.colliding = true;
+            }
+        }
+    }
+}
+
+void explode_nearby_balls_velocity_based(Vec2 center, float radius, float strength, std::vector<Ball>& balls) {
     for (auto& ball : balls) {
         Vec2 pos(ball.pos.x, ball.pos.y);
         Vec2 dir = pos - center;
@@ -587,6 +663,25 @@ void explode_nearby_balls(Vec2 center, float radius, float strength, std::vector
 
             ball.vel.x += norm_dir.x * force;
             ball.vel.y += norm_dir.y * force;
+        }
+    }
+}
+
+void explode_nearby_balls(Vec2 center, float radius, float strength, std::vector<Ball>& balls) {
+    for (auto& ball : balls) {
+        Vec2 pos = ball.pos;
+        Vec2 dir = pos - center;
+
+        float dist2 = dir.length_squared();
+        if (dist2 < radius * radius && dist2 > 1e-4f) {
+            float dist = sqrtf(dist2);
+            Vec2 norm_dir = dir / dist;
+            float force = strength * (1.0f - dist / radius);
+
+            // Напрямую сдвигаем prev_pos в противоположную сторону
+            // чтобы при следующем шаге Verlet получился "пинок"
+            ball.prev_pos.x -= norm_dir.x * force;
+            ball.prev_pos.y -= norm_dir.y * force;
         }
     }
 }
