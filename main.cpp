@@ -6,12 +6,12 @@
 
 int SCREEN_WIDTH = 1080;
 int SCREEN_HEIGHT = 1340;
-int BALLS_COUNT = 800;
-int MIN_SIZE = 10;
-int MAX_SIZE = 20;
-float GRAVITY = 600;
-int RESOLVE_STEPS = 32;
-float EXPLOSION_STRENGTH = 2;
+int BALLS_COUNT = 2000;
+int MIN_SIZE = 5;
+int MAX_SIZE = 10;
+float GRAVITY = 500;
+int RESOLVE_STEPS = 64;
+float EXPLOSION_STRENGTH = 5;
 
 struct Vec2 {
     float x, y;
@@ -271,14 +271,13 @@ void update() {
         
     auto collision_pairs = detect_collisions();
 
-// сортируем по убыванию глубины проникновения
-std::sort(collision_pairs.begin(), collision_pairs.end(), [](const BallPair& a, const BallPair& b) {
-    return a.penetration > b.penetration;
-});
+    // сортируем по убыванию глубины проникновения
+    std::sort(collision_pairs.begin(), collision_pairs.end(), [](const BallPair& a, const BallPair& b) { return a.penetration > b.penetration; });
 
-resolve_collisions_impulse_baumgarte(collision_pairs, RESOLVE_STEPS);
-resolve_collisions_pbd(collision_pairs, RESOLVE_STEPS);
-//resolve_collisions_naive_iterative(collision_pairs, RESOLVE_STEPS);
+    //resolve_collisions_naive_iterative(collision_pairs, RESOLVE_STEPS);
+    //resolve_collisions_impulse_baumgarte(collision_pairs, RESOLVE_STEPS);
+    resolve_collisions_pbd(collision_pairs, RESOLVE_STEPS);
+    
 }
 
 void draw() {
@@ -326,14 +325,16 @@ void init_ball(int x, int y) {
     b.vel.x = ((rand() % 200) - 100) / 50.0f;
     b.vel.y = ((rand() % 200) - 100) / 50.0f;
     b.radius = MIN_SIZE + rand() % MAX_SIZE;
-    b.color = {
-        static_cast<Uint8>(rand() % 256),
-        static_cast<Uint8>(rand() % 256),
-        static_cast<Uint8>(rand() % 256),
-        255
-    };
+
+    Uint8 r = static_cast<Uint8>(rand() % 30);               // почти без красного (0–29)
+    Uint8 g = static_cast<Uint8>(100 + rand() % 80);         // мягкий зелёный (100–179)
+    Uint8 bl = static_cast<Uint8>(160 + rand() % 96);        // доминирующий синий (160–255)
+
+    b.color = { r, g, bl, 255 };
+
     balls.push_back(b);
 }
+
 
 void init_balls(int count) {
     balls.clear();
@@ -360,12 +361,24 @@ void update_ball_by_velocity(Ball& b) {
 }
 
 void update_ball_verlet_by_pos(Ball& b) {
+    float max_displacement = 5.0f;  // настраиваемое ограничение
+    
     Vec2 temp = b.pos;
-    Vec2 acceleration = {0.0f, GRAVITY}; // только гравитация
-    // Verlet: pos += (pos - prev_pos) + acceleration * dt^2
+    Vec2 acceleration = {0.0f, GRAVITY};
     b.pos += (b.pos - b.prev_pos) + acceleration * (dt * dt);
+
+    // Ограничение максимального смещения за кадр (скорости)
+    Vec2 velocity = b.pos - b.prev_pos;
+    
+    float len = velocity.length();
+    if (len > max_displacement) {
+        velocity = velocity * (max_displacement / len);
+        b.pos = b.prev_pos + velocity;
+    }
+
     b.prev_pos = temp;
 }
+
 
 void update_ball_walls_and_floor(Ball& b) {
 
